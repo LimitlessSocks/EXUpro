@@ -22,9 +22,22 @@ class LuaFileVerifier {
         this.initializeGlobalScope();
     }
     
+    static GLOBAL_IDENTIFIERS = `
+        REASON_COST REASON_EFFECT 
+        CATEGORY_DAMAGE
+        EFFECT_FLAG_PLAYER_TARGET EFFECT_FLAG_SINGLE_RANGE
+        EFFECT_TYPE_IGNITION EFFECT_TYPE_SINGLE
+        LOCATION_MZONE
+        HINT_SELECTMSG HINTMSG_FACEUP
+        RESET_EVENT
+        EFFECT_UPDATE_ATTACK EFFECT_UPDATE_DEFENSE
+        aux.Stringid aux.AddKaijuProcedure
+        Duel.IsCanRemoveCounter Duel.RemoveCounter Duel.Damage Duel.Hint Duel.GetMatchingGroup
+        Effect.CreateEffect
+        GetID
+    `.trim().split(/\s+/);
     initializeGlobalScope() {
-        const GLOBAL_IDENTIFIERS = "REASON_COST CATEGORY_DAMAGE EFFECT_TYPE_IGNITION EFFECT_FLAG_PLAYER_TARGET LOCATION_MZONE HINT_SELECTMSG HINTMSG_FACEUP REASON_EFFECT EFFECT_TYPE_SINGLE EFFECT_FLAG_SINGLE_RANGE EFFECT_UPDATE_ATTACK RESET_EVENT EFFECT_UPDATE_DEFENSE aux.Stringid Duel.IsCanRemoveCounter Duel.RemoveCounter Duel.Damage Duel.Hint".split(" ");
-        for(let gid of GLOBAL_IDENTIFIERS) {
+        for(let gid of LuaFileVerifier.GLOBAL_IDENTIFIERS) {
             this.addDefine(gid, 0, false);
         }
     }
@@ -111,6 +124,15 @@ class LuaFileVerifier {
         return !!object.left;
     }
     
+    static LITERAL_EXPRESSIONS = [
+        "NumericLiteral",
+        "BooleanLiteral",
+        "NilLiteral"
+    ];
+    static BINARY_EXPRESSIONS = [
+        "BinaryExpression",
+        "LogicalExpression"
+    ];
     checkExpression(expression, localDepth) {
         assert(typeof expression == "object",
             `Cannot check expression of non-object type ${typeof expression}`);
@@ -130,13 +152,12 @@ class LuaFileVerifier {
             for(let arg of expression.arguments) {
                 console.log("Arg", arg);
                 this.checkExpression(arg, localDepth);
-                // process.exit(0);
             }
         }
-        else if(expression.type === "NumericLiteral" || expression.type === "BooleanLiteral") {
+        else if(LuaFileVerifier.LITERAL_EXPRESSIONS.includes(expression.type)) {
             // ignore
         }
-        else if(expression.type === "BinaryExpression" || expression.type === "LogicalExpression") {
+        else if(LuaFileVerifier.BINARY_EXPRESSIONS.includes(expression.type)) {
             try {
                 let leftName = this.getIdentifierName(expression.left);
                 this.addUse(leftName, localDepth);
@@ -179,7 +200,9 @@ class LuaFileVerifier {
                     let varName = this.getIdentifierName(varObject);
                     this.addDefine(varName, localDepth, true);
                     // TODO: derived properties based on the expression
-                    // TODO: check expression
+                }
+                for(let arg of statement.init) {
+                    this.checkExpression(arg, localDepth);
                 }
             }
             else if(type === "AssignmentStatement") {
