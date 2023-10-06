@@ -8,10 +8,18 @@ const assert = (expr, ifError = "<no reason provided>") => {
     }
 };
 
+const words = (templates, ...values) => {
+    assert(values.length === 0, "Cannot handle interpolated values in words yet");
+    return templates.join("")
+        .trim()
+        .split(/\s+/);
+};
+
 // performs static analysis on lua code for things like using undefined variables
 class LuaFileVerifier {
-    constructor(code) {
+    constructor(code, quiet = true) {
         this.code = code;
+        this.quiet = quiet;
         // this.defineds and this.useds are indexed by scope number
         // the head (scope number 0) is "global"
         this.defineds = [ new Map() ];
@@ -22,7 +30,7 @@ class LuaFileVerifier {
         this.initializeGlobalScope();
     }
     
-    static GLOBAL_IDENTIFIERS = `
+    static GLOBAL_IDENTIFIERS = words`
         REASON_COST REASON_EFFECT 
         CATEGORY_DAMAGE
         EFFECT_FLAG_PLAYER_TARGET EFFECT_FLAG_SINGLE_RANGE
@@ -35,21 +43,32 @@ class LuaFileVerifier {
         Duel.IsCanRemoveCounter Duel.RemoveCounter Duel.Damage Duel.Hint Duel.GetMatchingGroup
         Effect.CreateEffect
         GetID
-    `.trim().split(/\s+/);
+        c:RegisterEffect e:GetHandler g:GetFirst tc:GetTextAttack
+    `;
+    // TODO: rectify hack for parameters. right now, they depend on convention
+    // (e.g., c inherently means something)
     initializeGlobalScope() {
         for(let gid of LuaFileVerifier.GLOBAL_IDENTIFIERS) {
             this.addDefine(gid, 0, false);
         }
     }
     
-    warn(...message) {
+    warn(message) {
         this.warnings.push(message);
+    }
+    
+    log(...args) {
+        if(this.quiet) return;
+        console.log(...args);
     }
     
     showWarnings() {
         this.warnings.forEach((warning, idx) => {
-            console.warn(`Warning #${idx + 1}:`, ...warning);
+            console.warn(`Warning #${idx + 1}:`, warning);
         });
+        if(!this.warnings.length) {
+            console.log("No fatal warnings!");
+        }
     }
     
     getIdentifierName(ident) {
@@ -70,14 +89,14 @@ class LuaFileVerifier {
     }
     
     addLocalScope() {
-        console.log("Starting new local scope");
+        this.log("Starting new local scope");
         this.defineds.push(new Map());
         this.useds.push(new Map());
     }
     
     removeLocalScope() {
         assert(this.defineds.length > 1, "Cannot remove top scope");
-        console.log("Removing old local scope");
+        this.log("Removing old local scope");
         this.defineds.pop();
         this.useds.pop();
     }
@@ -96,25 +115,88 @@ class LuaFileVerifier {
             `Defineds length ${this.defineds.length} out of sync with useds length ${this.useds.length}`);
     }
     
+    addDeclare(name, localDepth, isLocal) {
+        if(!isLocal) {
+            localDepth = 0;
+        }
+        this.assertHasScopeDepth(localDepth);
+        // TODO: check only localDepth scope?
+        if(this.isDefined(name, localDepth)) {
+            this.warn({
+                type: "VariableRedefinition",
+                name
+            });
+        }
+        else {
+            // clear warnings. this might not work in all cases.
+            this.warnings = this.warnings.filter(warning =>
+                !(warning.type === "UseUndefined" && warning.name === name)
+            );
+        }
+    }
+    
     addDefine(name, localDepth, isLocal) {
         if(!isLocal) {
             localDepth = 0;
         }
         this.assertHasScopeDepth(localDepth);
-        if(this.isDefined(name, localDepth)) {
-            // is this even necessary? probably not
-            // this.warn(`Variable redefinition of ${name}`);
-        }
-        console.log("Defining:", name, "@", localDepth);
+        this.log("Defining:", name, "@", localDepth);
         this.defineds[localDepth].set(name, true);
+    }
+    
+    static DERIVED_PROPERTIES = new Map([
+        ["Effect.CreateEffect", words`
+            Clone
+            SetCategory
+            SetCode
+            SetCost
+            SetCountLimit
+            SetDescription
+            SetOperation
+            SetProperty
+            SetRange
+            SetReset
+            SetTarget
+            SetType
+            SetValue
+        `],
+    ]);
+    addDerivedDefine(name, derivedIdent, localDepth, isLocal) {
+        if(!isLocal) {
+            localDepth = 0;
+        }
+        this.assertHasScopeDepth(localDepth);
+        if(derivedIdent.endsWith(":Clone")) {
+            let scope = this.defineds[localDepth];
+            let cloneTarget = derivedIdent.slice(0, -5); // include the colon
+            for(let key of scope.keys()) {
+                if(key.startsWith(cloneTarget)) {
+                    let property = key.slice(cloneTarget.length);
+                    this.addDefine(`${name}:${property}`, localDepth, isLocal);
+                }
+            }
+        }
+        
+        let props = LuaFileVerifier.DERIVED_PROPERTIES.get(derivedIdent);
+        // assert(props, `No defined derive`);
+        if(!props) {
+            console.warn(`No derived properties found for ${derivedIdent}`);
+            return;
+        }
+        for(let prop of props) {
+            this.addDefine(`${name}:${prop}`, localDepth, isLocal);
+        }
     }
     
     addUse(name, localDepth) {
         this.assertHasScopeDepth(localDepth);
         if(!this.isDefined(name, localDepth)) {
-            this.warn(`Using undefined variable ${name}`);
+            this.warn({
+                type: "UseUndefined",
+                name
+            });
         }
-        console.log("Using:", name, "@", localDepth);
+        this.log("Using:", name, "@", localDepth);
         this.useds[localDepth].set(name, true);
     }
     
@@ -150,7 +232,7 @@ class LuaFileVerifier {
             let baseName = this.getIdentifierName(expression.base);
             this.addUse(baseName, localDepth);
             for(let arg of expression.arguments) {
-                console.log("Arg", arg);
+                // this.log("Arg", arg);
                 this.checkExpression(arg, localDepth);
             }
         }
@@ -192,14 +274,21 @@ class LuaFileVerifier {
         }
         for(let statement of ast.body) {
             let { type } = statement;
-            console.log(`[[ STATEMENT ${type} ]]`);
+            this.log(`[[ STATEMENT ${type} ]]`);
             if(type === "LocalStatement") {
-                console.log(statement);
+                this.log(statement);
+                let derivedIdent = null;
+                if(statement.init[0].type === "CallExpression") {
+                    derivedIdent = this.getIdentifierName(statement.init[0].base);
+                }
                 // definition location
                 for(let varObject of statement.variables) {
                     let varName = this.getIdentifierName(varObject);
+                    this.addDeclare(varName, localDepth, true);
                     this.addDefine(varName, localDepth, true);
-                    // TODO: derived properties based on the expression
+                    if(derivedIdent) {
+                        this.addDerivedDefine(varName, derivedIdent, localDepth, true);
+                    }
                 }
                 for(let arg of statement.init) {
                     this.checkExpression(arg, localDepth);
@@ -214,12 +303,13 @@ class LuaFileVerifier {
                 }
             }
             else if(type === "FunctionDeclaration") {
-                console.log(statement);
+                this.log(statement);
                 // definition location
                 let funcName = this.getIdentifierName(statement.identifier);
+                this.addDeclare(funcName, localDepth, statement.isLocal);
                 this.addDefine(funcName, localDepth, statement.isLocal);
                 this.addLocalScope();
-                console.log("Defining local parameters...");
+                this.log("Defining local parameters...");
                 for(let param of statement.parameters) {
                     let paramName = this.getIdentifierName(param);
                     this.addDefine(paramName, localDepth + 1, true);
@@ -228,13 +318,13 @@ class LuaFileVerifier {
                 this.removeLocalScope();
             }
             else if(type === "CallStatement") {
-                console.log(statement);
+                this.log(statement);
                 this.checkExpression(statement.expression, localDepth);
             }
             else if(type === "IfStatement") {
                 // includes all branches
                 for(let branch of statement.clauses) {
-                    console.log(branch);
+                    this.log(branch);
                     if(branch.condition) {
                         this.checkExpression(branch.condition, localDepth)
                     }
@@ -243,18 +333,18 @@ class LuaFileVerifier {
             }
             else if(type === "ReturnStatement") {
                 for(let arg of statement.arguments) {
-                    console.log("Arg in return", arg);
+                    this.log("Arg in return", arg);
                     this.checkExpression(arg, localDepth);
                 }
             }
             else {
-                console.log("unhandled type:", type);
-                console.log(statement);
+                this.log("unhandled type:", type);
+                this.log(statement);
                 process.exit(1);
             }
             
             
-            console.log("-".repeat(30));
+            this.log("-".repeat(30));
         }
         if(depth > 0) {
             console.groupEnd();
